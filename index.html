@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Tauben Runner – Schräglauf</title>
+<style>
+:root{--bg:#0b0b0c;--panel:#151515;--text:#f4f4f4;--muted:#b7b7bc}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overscroll-behavior:none}
+body{min-height:100svh}
+.app{min-height:100svh;display:flex;flex-direction:column;padding:max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom)) 10px;gap:10px}
+.topbar{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:stretch}
+.brand,.stat,.toggle{background:var(--panel);border:1px solid #2c2c2f;border-radius:18px}
+.brand{padding:12px 14px;min-width:0}
+.brand h1{margin:0;font-size:1.12rem;line-height:1.05}
+.brand p{margin:6px 0 0;color:var(--muted);font-size:.78rem;line-height:1.24}
+.stat{min-width:82px;padding:10px 12px;display:flex;flex-direction:column;justify-content:center}
+.stat .label{color:var(--muted);font-size:.72rem}
+.stat .value{font-size:1.45rem;font-weight:800;line-height:1.05;margin-top:2px}
+.toggle{padding:12px 16px;color:var(--text);font-weight:700;font-size:.82rem;cursor:pointer}
+.toggle.active{background:#293325;border-color:#495f40}
+.game-wrap{position:relative;flex:1;min-height:0;border-radius:26px;overflow:hidden;border:1px solid #313136;background:#000;box-shadow:0 22px 45px rgba(0,0,0,.34)}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:16px}
+.panel{width:min(92%,360px);background:rgba(255,255,255,.9);backdrop-filter:blur(8px);color:#111;padding:20px 18px;border-radius:24px;text-align:center;border:1px solid rgba(255,255,255,.75);box-shadow:0 18px 38px rgba(0,0,0,.2)}
+.panel h2{margin:8px 0 0;font-size:1.5rem;line-height:1.1}
+.panel p{margin:12px 0 0;color:#444;line-height:1.4;font-size:.95rem}
+.panel button{margin-top:16px;border:0;background:#111;color:#fff;border-radius:14px;padding:12px 16px;font-weight:800;font-size:1rem;cursor:pointer}
+.footer{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tip{background:var(--panel);border:1px solid #2c2c2f;border-radius:16px;padding:10px 12px;color:var(--muted);font-size:.76rem;line-height:1.25}
+@media (min-width:700px){.app{max-width:440px;margin:0 auto}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <h1>Tauben Runner</h1>
+      <p>Schräglauf. Linear, mit Parallax, höherem Flug, längeren Jahreszeiten und stabil ohne Live-Musik.</p>
+    </div>
+    <div class="stat"><div class="label">Punkte</div><div class="value" id="score">0</div></div>
+    <div class="stat"><div class="label">Zone</div><div class="value" id="zoneLabel">1</div></div>
+  </div>
+
+  <button id="musicBtn" class="toggle">Musik: deaktiviert</button>
+
+  <div class="game-wrap">
+    <canvas id="game" width="540" height="960"></canvas>
+    <div class="overlay" id="overlay">
+      <div class="panel" id="panel">
+        <div style="font-size:30px">🐦</div>
+        <h2>Tauben Runner: Schräglauf</h2>
+        <p>Ein linearer Runner mit Parallax, kleinen Plattformen und einer kleinen Tauben-Verwandlung: Kleidchen, Krone, Zauberstab – dann startet die Musik.</p>
+        <button id="startBtn">Spiel starten</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="tip">Nach 3, 6 und 9 Sekunden verwandelt sich die Taube Stück für Stück. Nach 10 Sekunden startet die Musik.</div>
+    <div class="tip">Stabiler als das Kamera-Hochstapeln, aber spielerisch dichter.</div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const panel = document.getElementById('panel');
+const scoreEl = document.getElementById('score');
+const zoneLabel = document.getElementById('zoneLabel');
+const musicBtn = document.getElementById('musicBtn');
+
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+const BASE_SPEED = 2.45;
+const SPEED_GAIN = 0.00045;
+const NORMAL_GRAVITY = 0.72;
+const GLIDE_GRAVITY = 0.12;
+const JUMP_POWER = -14.6;
+const GLIDE_TARGET_Y = HEIGHT * 0.22;
+const GLIDE_ASCEND_PULL = 0.42;
+const GLIDE_DESCEND_PULL = 0.03;
+const MAX_GLIDE_RISE = -4.0;
+const MAX_GLIDE_FALL = 0.68;
+const MAX_OBSTACLES = 8;
+const MAX_BONUS = 2;
+const MAX_POPUPS = 6;
+const MAX_PLATFORMS = 7;
+
+let running = false, gameOver = false, hold = false;
+let score = 0, frame = 0, speed = BASE_SPEED, obstacleTimer = 115, platformTimer = 180;
+let flash = 0, musicEnabled = false, musicPulse = 0;
+let best = Number(localStorage.getItem('tauben_schraeg_best') || 0);
+
+const pigeon = {x:118,y:640,vy:0,wingPhase:0,headPhase:0,runPhase:0,tilt:0,flapBoost:0,onPlatform:false,magicSpin:0};
+let gameStartTime = 0;
+let transformStage = 0;
+let musicStarted = false;
+const obstacles = [];
+const bonusPigeons = [];
+const popups = [];
+const platforms = [];
+
+const clouds = [{x:80,y:90,s:0.95},{x:260,y:140,s:0.8},{x:430,y:100,s:1.08}];
+const farTrees = [{x:80,size:0.9},{x:230,size:1.1},{x:400,size:0.8},{x:620,size:1.0}];
+const stars = Array.from({length:30},(_,i)=>({x:(i*97)%WIDTH,y:(i*173)%HEIGHT,s:i%3?1:2}));
+const shootingStars = Array.from({length:6}, (_, i) => ({
+  x: WIDTH + i * 110,
+  y: 120 + (i * 57) % 220,
+  len: 30 + (i % 3) * 12,
+  speed: 2.6 + i * 0.18,
+  active: false,
+  wait: 40 + i * 20
+}));
+
+let audioCtx = null, musicNodes = null;
+
+function ensureAudio(){
+  if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+}
+function jumpSound(){
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  const a = audioCtx.createOscillator(), b = audioCtx.createOscillator(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  f.type='lowpass'; f.frequency.setValueAtTime(1200,t);
+  a.type='square'; b.type='triangle';
+  a.frequency.setValueAtTime(780,t); a.frequency.exponentialRampToValueAtTime(490,t+0.08);
+  b.frequency.setValueAtTime(280,t); b.frequency.exponentialRampToValueAtTime(190,t+0.09);
+  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.04,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+0.11);
+  a.connect(f); b.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  a.start(t); b.start(t); a.stop(t+0.12); b.stop(t+0.12);
+}
+function bonusSound(){
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [740,988,1318].forEach((n,i)=>{
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='triangle'; o.frequency.setValueAtTime(n,t+i*0.05);
+    g.gain.setValueAtTime(0.0001,t+i*0.05);
+    g.gain.exponentialRampToValueAtTime(0.03,t+i*0.05+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+i*0.05+0.18);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(t+i*0.05); o.stop(t+i*0.05+0.2);
+  });
+}
+function endMelody(){
+  ensureAudio();
+  const t = audioCtx.currentTime;
+  [523.25,659.25,783.99,659.25].forEach((n,i)=>{
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='triangle'; o.frequency.setValueAtTime(n,t+i*0.13);
+    g.gain.setValueAtTime(0.0001,t+i*0.13);
+    g.gain.exponentialRampToValueAtTime(0.035,t+i*0.13+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+i*0.13+0.2);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(t+i*0.13); o.stop(t+i*0.13+0.22);
+  });
+}
+function setMusic(enabled){ if(true){ musicEnabled = false; return; }
+function __never(){
+  musicEnabled = enabled;
+  musicBtn.textContent = enabled ? 'Musik: an' : 'Musik: aus';
+  musicBtn.classList.toggle('active', enabled);
+  ensureAudio();
+  if(enabled){
+    if(!musicNodes){
+      const master=audioCtx.createGain(), pad1=audioCtx.createOscillator(), pad2=audioCtx.createOscillator(), pad3=audioCtx.createOscillator();
+      const filter=audioCtx.createBiquadFilter(), mix=audioCtx.createGain(), lfo=audioCtx.createOscillator(), lfoGain=audioCtx.createGain();
+      master.gain.value=0.03; master.connect(audioCtx.destination);
+      pad1.type='sine'; pad2.type='triangle'; pad3.type='sine';
+      pad1.frequency.value=174.61; pad2.frequency.value=220; pad3.frequency.value=261.63;
+      filter.type='lowpass'; filter.frequency.value=900; mix.gain.value=0.42;
+      lfo.type='sine'; lfo.frequency.value=0.2; lfoGain.gain.value=0.1;
+      lfo.connect(lfoGain); lfoGain.connect(mix.gain);
+      pad1.connect(filter); pad2.connect(filter); pad3.connect(filter); filter.connect(mix); mix.connect(master);
+      pad1.start(); pad2.start(); pad3.start(); lfo.start();
+      musicNodes = {master,pad1,pad2,pad3,filter};
+    }
+    musicNodes.master.gain.cancelScheduledValues(audioCtx.currentTime);
+    musicNodes.master.gain.setTargetAtTime(0.03, audioCtx.currentTime, 0.2);
+  } else if(musicNodes){
+    musicNodes.master.gain.cancelScheduledValues(audioCtx.currentTime);
+    musicNodes.master.gain.setTargetAtTime(0.0001, audioCtx.currentTime, 0.15);
+  }
+}
+}
+function currentZone(){
+  if(score < 180) return 'street';
+  if(score < 300) return 'sky';
+  return 'space';
+}
+function currentSeason(){
+  if(currentZone() !== 'street') return '';
+  if(score < 45) return 'spring';
+  if(score < 90) return 'summer';
+  if(score < 135) return 'autumn';
+  return 'winter';
+}
+function zoneNumber(){ return currentZone()==='street' ? 1 : currentZone()==='sky' ? 2 : 3; }
+function zoneSlope(){
+  if(score < 180) return Math.min(120, score * 0.5);
+  if(score < 300) return 120 + (score-180) * 0.42;
+  return 170 + (score-300) * 0.32;
+}
+function laneYAt(x){
+  const left = 760 - zoneSlope();
+  const rise = currentZone()==='space' ? 78 : currentZone()==='sky' ? 62 : 48;
+  return left - (x/WIDTH) * rise;
+}
+function groundYForPlayer(){ return laneYAt(pigeon.x) - 52; }
+
+function updateMusic(){
+  if(!musicEnabled || !musicNodes || !running) return;
+  musicPulse++;
+  const zone = currentZone();
+  if(zone==='street') musicNodes.filter.frequency.setTargetAtTime(900, audioCtx.currentTime, 0.3);
+  else if(zone==='sky') musicNodes.filter.frequency.setTargetAtTime(1180, audioCtx.currentTime, 0.3);
+  else musicNodes.filter.frequency.setTargetAtTime(1450, audioCtx.currentTime, 0.3);
+
+  if(musicPulse % 240 === 0){
+    const t = audioCtx.currentTime;
+    let seq;
+    if(zone==='street'){
+      const season = currentSeason();
+      if(season==='spring') seq = [[174.61,220,261.63],[196,246.94,293.66],[164.81,207.65,246.94],[146.83,220,246.94]];
+      else if(season==='summer') seq = [[196,246.94,293.66],[220,277.18,329.63],[174.61,220,293.66],[196,261.63,329.63]];
+      else if(season==='autumn') seq = [[164.81,207.65,246.94],[146.83,196,246.94],[174.61,220,261.63],[155.56,196,233.08]];
+      else seq = [[146.83,196,246.94],[130.81,174.61,220],[155.56,196,233.08],[146.83,185,220]];
+    } else if(zone==='sky') seq = [[196,246.94,329.63],[220,277.18,329.63],[174.61,220,293.66],[196,261.63,329.63]];
+    else seq = [[220,293.66,440],[246.94,329.63,493.88],[196,261.63,392],[220,329.63,523.25]];
+    const chord = seq[Math.floor((musicPulse/240)%seq.length)];
+    musicNodes.pad1.frequency.setTargetAtTime(chord[0], t, 0.35);
+    musicNodes.pad2.frequency.setTargetAtTime(chord[1], t, 0.35);
+    musicNodes.pad3.frequency.setTargetAtTime(chord[2], t, 0.35);
+  }
+}
+function showStartPanel(){
+  overlay.style.display='flex';
+  panel.innerHTML='<div style="font-size:30px">🐦</div><h2>Tauben Runner: Schräglauf</h2><p>Ein linearer Runner, aber jetzt mit mehr Parallax, mehr Objekten und kleinen Plattform-Ebenen wie in einem leichten Jump\\'n\\'Run.</p><button id="startBtn">Spiel starten</button>';
+  document.getElementById('startBtn').onclick = startGame;
+}
+function storyForScore(s){
+  if(s < 45) return 'Die Taube lief durch den Frühling, als hätte sie irgendwo einen geheimen Saatgutvertrag.';
+  if(s < 90) return 'Dann kam Sommer. Alles wurde heller, wärmer und leicht größenwahnsinnig.';
+  if(s < 135) return 'Im Herbst raschelte die Welt unter der Taube weg. Selbst der Weg klang nach Abschied.';
+  if(s < 180) return 'Der Winter hielt erstaunlich lange. Die Taube nahm ihn persönlich, aber professionell.';
+  if(s < 300) return 'Erst danach begann der Himmel. Die Erde hatte sich Zeit gelassen, fast unanständig viel.';
+  return 'Irgendwann kam dann doch das All, mit Helm, Planeten und den üblichen kosmischen Peinlichkeiten.';
+}
+function showGameOverPanel(){
+  overlay.style.display='flex';
+  if(score > best) { best = score; localStorage.setItem('tauben_schraeg_best', String(best)); }
+  panel.innerHTML='<div style="font-size:30px">💥🐦</div><h2>Flug beendet</h2><p>Punkte: <b>'+score+'</b>. Rekord: <b>'+best+'</b>.</p><p>'+storyForScore(score)+'</p><button id="restartBtn">Nochmal</button>';
+  document.getElementById('restartBtn').onclick = resetGame;
+}
+function resetGame(){
+  running=false; gameOver=false; hold=false; score=0; frame=0; speed=BASE_SPEED; obstacleTimer=115; platformTimer=180; flash=0;
+  gameStartTime = 0; transformStage = 0; musicStarted = false;
+  pigeon.y=640; pigeon.vy=0; pigeon.headPhase=0; pigeon.runPhase=0; pigeon.tilt=0; pigeon.flapBoost=0; pigeon.onPlatform=false; pigeon.magicSpin=0; pigeon.wingPhase=0;
+  obstacles.length=0; bonusPigeons.length=0; popups.length=0; platforms.length=0;
+  scoreEl.textContent='0'; zoneLabel.textContent='1'; showStartPanel();
+}
+function startGame(){
+  const a=document.getElementById('bgm');
+  if(a){
+    a.pause();
+    a.currentTime = 0;
+    a.volume = 0.32;
+  }
+  ensureAudio();
+  overlay.style.display='none';
+  running=true;
+  gameOver=false;
+  gameStartTime = performance.now();
+  transformStage = 0;
+  musicStarted = false;
+}
+function startHold(){
+  hold=true;
+  if(!running && !gameOver){ startGame(); return; }
+  if(gameOver){ resetGame(); return; }
+
+  const gy = currentGroundForPigeon();
+
+  // normal jump from ground / platform
+  if(pigeon.y >= gy-1 || pigeon.onPlatform){
+    pigeon.vy = JUMP_POWER;
+    pigeon.flapBoost = 1;
+    pigeon.onPlatform = false;
+    jumpSound();
+    return;
+  }
+
+  // if already airborne and falling, immediately interrupt the fall
+  if(pigeon.vy > -1.4){
+    pigeon.vy = -2.8;
+  }
+  pigeon.flapBoost = 1;
+}
+function endHold(){ hold=false; }
+
+function currentGroundForPigeon(){ return groundYForPlayer(); }
+
+function spawnObstacle(){
+  if(obstacles.length >= MAX_OBSTACLES) return;
+  const zone = currentZone();
+  const baseY = laneYAt(WIDTH - 40);
+  const roll = Math.random();
+  if(zone==='street'){
+    if(roll > 0.7) obstacles.push({kind:'cat', x:WIDTH + 30, y:baseY - 18, w:56, h:70});
+    else if(roll > 0.36) obstacles.push({kind:'cone', x:WIDTH + 30, y:baseY - 4, w:34, h:56});
+    else obstacles.push({kind:'bag', x:WIDTH + 30, y:baseY + 6, w:50, h:44});
+    obstacleTimer = 105 + Math.random()*70;
+  } else if(zone==='sky'){
+    if(roll > 0.66) obstacles.push({kind:'drone', x:WIDTH + 30, y:baseY - 10, w:54, h:34});
+    else if(roll > 0.33) obstacles.push({kind:'gust', x:WIDTH + 30, y:baseY - 12, w:48, h:30});
+    else obstacles.push({kind:'snack', x:WIDTH + 30, y:baseY - 8, w:56, h:28});
+    obstacleTimer = 115 + Math.random()*75;
+  } else {
+    if(roll > 0.66) obstacles.push({kind:'satellite', x:WIDTH + 30, y:baseY - 22, w:52, h:42});
+    else if(roll > 0.33) obstacles.push({kind:'meteor', x:WIDTH + 30, y:baseY - 12, w:44, h:34});
+    else obstacles.push({kind:'bomb', x:WIDTH + 30, y:baseY - 12, w:36, h:36});
+    obstacleTimer = 124 + Math.random()*82;
+  }
+}
+function maybeSpawnBonus(){
+  if(frame % 250 !== 0 || bonusPigeons.length >= MAX_BONUS) return;
+  if(Math.random() < 0.24){
+    bonusPigeons.push({x:WIDTH + 40, y:220 + Math.random()*260, w:42, h:30, flap:Math.random()*6.28});
+  }
+}
+function spawnPlatform(){
+  if(platforms.length >= MAX_PLATFORMS) return;
+  const zone = currentZone();
+  if(zone==='space' && Math.random() < 0.55) return;
+  const x = WIDTH + 30;
+  const w = 88 + Math.random()*54;
+  const lane = laneYAt(WIDTH - 30);
+  const h = 20;
+  const y = lane - (zone==='street' ? 90 + Math.random()*50 : zone==='sky' ? 110 + Math.random()*70 : 95 + Math.random()*55);
+  platforms.push({x,y,w,h,zone});
+  platformTimer = 170 + Math.random()*120;
+}
+function pruneWorld(){
+  for(let i=obstacles.length-1;i>=0;i--) if(obstacles[i].x < -120) obstacles.splice(i,1);
+  for(let i=bonusPigeons.length-1;i>=0;i--) if(bonusPigeons[i].x < -100) bonusPigeons.splice(i,1);
+  for(let i=platforms.length-1;i>=0;i--) if(platforms[i].x + platforms[i].w < -120) platforms.splice(i,1);
+  for(let i=popups.length-1;i>=0;i--) if(popups[i].life <= 0) popups.splice(i,1);
+  while(obstacles.length > MAX_OBSTACLES) obstacles.shift();
+  while(bonusPigeons.length > MAX_BONUS) bonusPigeons.shift();
+  while(platforms.length > MAX_PLATFORMS) platforms.shift();
+  while(popups.length > MAX_POPUPS) popups.shift();
+}
+function rectsCollide(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+
+function updateTransformation(){
+  if(!running || !gameStartTime) return;
+  const elapsed = (performance.now() - gameStartTime) / 1000;
+
+  let newStage = 0;
+  if(elapsed >= 9) newStage = 3;
+  else if(elapsed >= 6) newStage = 2;
+  else if(elapsed >= 3) newStage = 1;
+
+  if(newStage > transformStage){
+    transformStage = newStage;
+    pigeon.magicSpin = Math.PI * 2.1;
+  }
+
+  if(elapsed >= 10 && !musicStarted){
+    const a = document.getElementById('bgm');
+    if(a){
+      a.play().catch(()=>{});
+    }
+    musicStarted = true;
+  }
+}
+function update(){
+  updateMusic();
+  updateTransformation();
+  clouds.forEach(c=>{
+    c.x -= 0.12 * c.s;
+    if(c.x < -120){ c.x = WIDTH + Math.random()*80; c.y = 70 + Math.random()*150; c.s = 0.75 + Math.random()*0.55; }
+  });
+
+  shootingStars.forEach(s=>{
+    if(currentZone() !== 'space'){
+      s.active = false;
+      s.wait = 30 + ((frame + s.x) % 90);
+      s.x = WIDTH + 40 + ((frame + s.y) % 140);
+      return;
+    }
+    if(!s.active){
+      s.wait -= 1;
+      if(s.wait <= 0){
+        s.active = true;
+        s.x = WIDTH + Math.random()*120;
+        s.y = 70 + Math.random()*220;
+      }
+    } else {
+      s.x -= s.speed + speed * 0.35;
+      s.y += s.speed * 0.55;
+      if(s.x < -s.len - 40 || s.y > HEIGHT + 40){
+        s.active = false;
+        s.wait = 40 + Math.floor(Math.random()*120);
+      }
+    }
+  });
+
+  popups.forEach(p=>{ p.y -= 0.8; p.life -= 1; });
+
+  if(!running){
+    pigeon.headPhase += 0.035;
+    pigeon.runPhase += 0.05;
+    pigeon.magicSpin *= 0.9;
+    return;
+  }
+
+  frame++;
+  if(frame % 10 === 0){
+    score++;
+    scoreEl.textContent = score;
+    zoneLabel.textContent = currentZone()==='street' ? String(zoneNumber()) + '·' + currentSeason().slice(0,2) : String(zoneNumber());
+  }
+
+  speed += SPEED_GAIN;
+  obstacleTimer--;
+  platformTimer--;
+  if(obstacleTimer <= 0) spawnObstacle();
+  if(platformTimer <= 0) spawnPlatform();
+  maybeSpawnBonus();
+
+  const wasY = pigeon.y;
+  pigeon.onPlatform = false;
+  const groundTop = currentGroundForPigeon();
+
+  let gravity = NORMAL_GRAVITY;
+  if(hold && pigeon.y < groundTop){
+    gravity = GLIDE_GRAVITY;
+
+    // if the player re-holds while descending, stop the drop quickly
+    if(pigeon.vy > 0.25){
+      pigeon.vy *= 0.35;
+    }
+
+    if(pigeon.y > GLIDE_TARGET_Y){
+      pigeon.vy -= GLIDE_ASCEND_PULL;
+      if(pigeon.vy < MAX_GLIDE_RISE) pigeon.vy = MAX_GLIDE_RISE;
+    } else {
+      pigeon.vy += GLIDE_DESCEND_PULL;
+      if(pigeon.vy > MAX_GLIDE_FALL) pigeon.vy = MAX_GLIDE_FALL;
+    }
+  }
+
+  pigeon.vy += gravity;
+  pigeon.y += pigeon.vy;
+
+  if(pigeon.y > groundTop){
+    pigeon.y = groundTop;
+    pigeon.vy = 0;
+    pigeon.onPlatform = true;
+  }
+  if(pigeon.y < GLIDE_TARGET_Y - 8){
+    pigeon.y = GLIDE_TARGET_Y - 8;
+    if(pigeon.vy < 0) pigeon.vy = 0.15;
+  }
+
+  for(let i=platforms.length-1;i>=0;i--) platforms[i].x -= speed;
+
+  const hitbox = {x:pigeon.x - 4, y:pigeon.y + 8, w:66, h:40};
+  for(const p
